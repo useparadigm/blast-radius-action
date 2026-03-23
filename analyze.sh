@@ -45,7 +45,7 @@ if [ -n "$EXISTING" ]; then
   echo "Updated existing blast radius comment"
 else
   # Create new comment
-  gh pr comment "${PR_NUMBER}" --body "${COMMENT_BODY}"
+  gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="${COMMENT_BODY}" > /dev/null
   echo "Posted new blast radius comment"
 fi
 
