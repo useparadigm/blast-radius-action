@@ -1,0 +1,40 @@
+name: 'Paradigm Blast Radius'
+description: 'Analyze the blast radius of a pull request using Paradigm code intelligence'
+branding:
+  icon: 'target'
+  color: 'orange'
+
+inputs:
+  github-token:
+    description: 'GitHub Personal Access Token linked to your Paradigm account'
+    required: true
+  project:
+    description: 'Paradigm project name'
+    required: true
+  api-url:
+    description: 'Paradigm API URL'
+    required: false
+    default: 'https://api.useparadigm.app'
+
+outputs:
+  verdict:
+    description: 'Analysis verdict: PASS, WARNING, or FAIL'
+    value: ${{ steps.analyze.outputs.verdict }}
+  affected:
+    description: 'Number of affected methods in blast radius'
+    value: ${{ steps.analyze.outputs.affected }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Analyze blast radius
+      id: analyze
+      shell: bash
+      env:
+        PARADIGM_TOKEN: ${{ inputs.github-token }}
+        PARADIGM_PROJECT: ${{ inputs.project }}
+        PARADIGM_API_URL: ${{ inputs.api-url }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: ${{ github.action_path }}/analyze.sh
