@@ -5,82 +5,90 @@ branding:
   color: 'orange'
 
 inputs:
-  anthropic-api-key:
-    description: 'Anthropic API key for Claude'
+  github-token:
+    description: 'GitHub Personal Access Token linked to your Paradigm account'
     required: true
-  paradigm-api-url:
-    description: 'Paradigm MCP server URL'
-    required: false
-    default: 'https://api.useparadigm.app/mcp'
   project:
     description: 'Paradigm project name'
     required: true
-  model:
-    description: 'Claude model to use'
+  api-url:
+    description: 'Paradigm API URL'
     required: false
-    default: 'claude-sonnet-4-6'
-  max-turns:
-    description: 'Max agent turns'
-    required: false
-    default: '10'
+    default: 'https://api.useparadigm.app'
+
+outputs:
+  verdict:
+    description: 'Analysis verdict: PASS, WARNING, or FAIL'
+    value: ${{ steps.analyze.outputs.verdict }}
+  affected:
+    description: 'Number of affected methods in blast radius'
+    value: ${{ steps.analyze.outputs.affected }}
 
 runs:
   using: 'composite'
   steps:
-    - name: Create MCP config
-      shell: bash
-      run: |
-        cat > /tmp/paradigm-mcp.json << EOF
-        {
-          "mcpServers": {
-            "paradigm": {
-              "type": "http",
-              "url": "${{ inputs.paradigm-api-url }}"
-            }
-          }
-        }
-        EOF
-
     - name: Analyze blast radius
-      uses: anthropics/claude-code-action@v1
-      with:
-        anthropic_api_key: ${{ inputs.anthropic-api-key }}
-        use_sticky_comment: true
-        claude_args: |
-          --mcp-config /tmp/paradigm-mcp.json
-          --allowedTools mcp__paradigm__analyze_pr,mcp__paradigm__get_method_body,mcp__paradigm__project_status,Read
-          --max-turns ${{ inputs.max-turns }}
-          --model ${{ inputs.model }}
-        prompt: |
-          You are a blast radius analyzer for pull requests. Your job is to identify what could break or needs attention when this PR is merged.
+      id: analyze
+      shell: bash
+      env:
+        PARADIGM_TOKEN: ${{ inputs.github-token }}
+        PARADIGM_PROJECT: ${{ inputs.project }}
+        PARADIGM_API_URL: ${{ inputs.api-url }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        # Call Paradigm API (LLM analysis happens server-side)
+        HTTP_CODE=$(curl -s -o /tmp/paradigm_response.json -w "%{http_code}" \
+          -X POST "${PARADIGM_API_URL}/api/hook/blast-radius" \
+          -H "Authorization: Bearer ${PARADIGM_TOKEN}" \
+          -H "Content-Type: application/json" \
+          -H "ngrok-skip-browser-warning: true" \
+          -d "{\"project\": \"${PARADIGM_PROJECT}\", \"repo\": \"${REPO}\", \"pr_number\": ${PR_NUMBER}}")
 
-          ## Steps
+        RESPONSE=$(cat /tmp/paradigm_response.json)
 
-          1. Call `analyze_pr` with repo "${{ github.repository }}" and pr_number ${{ github.event.pull_request.number }} to get the blast radius graph — which methods are changed, deleted, and what calls them.
+        if [ "$HTTP_CODE" != "200" ]; then
+          DETAIL=$(echo "$RESPONSE" | jq -r '.detail // empty' 2>/dev/null || true)
+          echo "::error::Paradigm API returned HTTP ${HTTP_CODE}: ${DETAIL:-$RESPONSE}"
+          exit 1
+        fi
 
-          2. For each MUST FIX or MUST CHECK item, use `get_method_body` to read the actual code of the affected method. Understand WHY it's affected — don't just say "this calls the changed method", explain what specifically could break.
+        # Parse response
+        VERDICT=$(echo "$RESPONSE" | jq -r '.verdict')
+        MARKDOWN=$(echo "$RESPONSE" | jq -r '.markdown')
+        AFFECTED=$(echo "$RESPONSE" | jq -r '.affected')
+        CHANGED=$(echo "$RESPONSE" | jq -r '.changed')
 
-          3. Write a concise blast radius report:
+        # Set outputs
+        echo "verdict=${VERDICT}" >> "$GITHUB_OUTPUT"
+        echo "affected=${AFFECTED}" >> "$GITHUB_OUTPUT"
 
-          ### Format
+        # Post sticky PR comment
+        COMMENT_MARKER="<!-- paradigm-blast-radius -->"
+        COMMENT_BODY="${COMMENT_MARKER}
+        ${MARKDOWN}"
 
-          **If no issues found:**
-          > Blast radius analysis: **PASS** — changes are self-contained, no cross-module impact detected.
+        EXISTING=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+          --jq ".[] | select(.body | contains(\"${COMMENT_MARKER}\")) | .id" \
+          2>/dev/null | head -1)
 
-          **If issues found:**
-          > ## Blast Radius: [VERDICT]
-          >
-          > **Summary**: [1-2 sentences on what changed and overall risk]
-          >
-          > ### Must address
-          > - **`MethodName`** in `file.py:line` — [concrete explanation of what breaks and why, based on reading the code]
-          >
-          > ### Worth checking
-          > - **`MethodName`** in `file.py:line` — [why this might be affected, what to verify]
+        if [ -n "$EXISTING" ]; then
+          gh api "repos/${REPO}/issues/comments/${EXISTING}" \
+            -X PATCH -f body="${COMMENT_BODY}" > /dev/null
+          echo "Updated blast radius comment"
+        else
+          gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            -f body="${COMMENT_BODY}" > /dev/null
+          echo "Posted blast radius comment"
+        fi
 
-          ## Rules
-          - Be concise. No method body dumps in the report.
-          - Verify before reporting — read the caller's code to confirm the dependency actually matters.
-          - If a "deleted" method still exists in the PR branch, it's not actually deleted (could be a diff artifact). Verify.
-          - Group related items (e.g. "3 admin endpoints all call `_gateway_get` which was changed").
-          - Project name for MCP calls: "${{ inputs.project }}"
+        # Summary
+        echo "## Blast Radius: ${VERDICT}" >> "$GITHUB_STEP_SUMMARY"
+        echo "Changed: ${CHANGED}, Affected: ${AFFECTED}" >> "$GITHUB_STEP_SUMMARY"
+
+        # Fail if critical
+        if [ "$VERDICT" = "FAIL" ]; then
+          echo "::error::Blast radius analysis found critical issues"
+          exit 1
+        fi

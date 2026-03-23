@@ -2,7 +2,7 @@
 
 AI-powered blast radius analysis for pull requests. Uses [Paradigm](https://useparadigm.app) code intelligence to trace how your changes propagate through the codebase — across repos, modules, and service boundaries.
 
-Unlike simple diff checks, this reads the actual code of affected methods, verifies real impact, and reports only what matters.
+Reads the actual code of affected methods, verifies real impact, and proposes fixes.
 
 ## Quick Start
 
@@ -16,14 +16,11 @@ jobs:
   blast-radius:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
       pull-requests: write
-      issues: write
     steps:
-      - uses: actions/checkout@v4
       - uses: useparadigm/blast-radius-action@v1
         with:
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github-token: ${{ secrets.PARADIGM_PAT }}
           project: "My Project"
 ```
 
@@ -31,33 +28,37 @@ jobs:
 
 1. **Paradigm account** — sign up at [app.useparadigm.app](https://app.useparadigm.app)
 2. **Project with indexed repos** — create a project and add your repositories
-3. **Anthropic API key** — add as `ANTHROPIC_API_KEY` secret in your repo
+3. **GitHub PAT** with `read:user` scope, linked to your Paradigm account — add as `PARADIGM_PAT` secret
 
 ## Inputs
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `anthropic-api-key` | Yes | — | Anthropic API key for Claude |
+| `github-token` | Yes | — | GitHub PAT linked to Paradigm account |
 | `project` | Yes | — | Paradigm project name |
-| `paradigm-api-url` | No | `https://api.useparadigm.app/mcp` | Paradigm MCP server URL |
-| `model` | No | `claude-sonnet-4-6` | Claude model |
-| `max-turns` | No | `10` | Max agent reasoning steps |
+| `api-url` | No | `https://api.useparadigm.app` | Paradigm API URL |
 
 ## What it does
 
-1. Fetches blast radius graph from Paradigm (changed methods -> callers -> cross-repo impact)
-2. Claude agent reads affected method bodies to verify real impact
-3. Posts a concise, verified report as a PR comment
-4. Updates the same comment on subsequent pushes (no spam)
+1. Sends PR info to Paradigm API (auth via your GitHub PAT)
+2. Paradigm traces blast radius through the code graph (callers, overrides, DB tables, remote calls)
+3. AI reads affected method bodies, verifies real impact, proposes fixes
+4. Posts a concise report as a PR comment (updates on re-push, no spam)
+5. Fails the check if critical issues found
 
 ## Example output
 
 > ## Blast Radius: WARNING
 >
-> **Summary**: `validate_input()` signature changed — 3 controllers depend on it, 1 cross-service caller.
+> **Summary**: `validate_input()` signature changed — 3 controllers depend on it.
 >
 > ### Must address
-> - **`OrderController.create_order`** in `orders/controller.py:42` — passes `user_id` as first arg which was removed from `validate_input`. Will raise TypeError at runtime.
+> - **`OrderController.create_order`** in `orders/controller.py:42` — passes `user_id` as first arg which was removed.
+>   **Proposed fix:**
+>   ```python
+>   - result = validate_input(user_id, order_data)
+>   + result = validate_input(order_data)
+>   ```
 >
 > ### Worth checking
-> - **`gateway.proxy_request`** in `gateway/app.py:15` — calls `validate_input` but only uses return value as boolean. Likely safe but verify.
+> - **`gateway.proxy_request`** in `gateway/app.py:15` — uses return value as boolean only. Likely safe.
