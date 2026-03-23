@@ -2,14 +2,20 @@
 set -euo pipefail
 
 # Call Paradigm API
-RESPONSE=$(curl -sf -X POST "${PARADIGM_API_URL}/api/hook/blast-radius" \
+HTTP_CODE=$(curl -s -o /tmp/paradigm_response.json -w "%{http_code}" \
+  -X POST "${PARADIGM_API_URL}/api/hook/blast-radius" \
   -H "Authorization: Bearer ${PARADIGM_TOKEN}" \
   -H "Content-Type: application/json" \
-  -d "{\"project\": \"${PARADIGM_PROJECT}\", \"repo\": \"${REPO}\", \"pr_number\": ${PR_NUMBER}}" \
-  2>&1) || {
-    echo "::error::Failed to call Paradigm API: ${RESPONSE}"
-    exit 1
-  }
+  -H "ngrok-skip-browser-warning: true" \
+  -d "{\"project\": \"${PARADIGM_PROJECT}\", \"repo\": \"${REPO}\", \"pr_number\": ${PR_NUMBER}}")
+
+RESPONSE=$(cat /tmp/paradigm_response.json)
+
+if [ "$HTTP_CODE" != "200" ]; then
+  DETAIL=$(echo "$RESPONSE" | jq -r '.detail // empty' 2>/dev/null || true)
+  echo "::error::Paradigm API returned HTTP ${HTTP_CODE}: ${DETAIL:-$RESPONSE}"
+  exit 1
+fi
 
 # Parse response
 VERDICT=$(echo "$RESPONSE" | jq -r '.verdict')
